@@ -17,6 +17,7 @@ export class PlaybackEngine {
   private accent: boolean[] = [true, false, false, false];
   private tickDuration = 0.25;
   private metronomeOn = true;
+  private subdivide = false;
   private readonly lookaheadMs = 25;
   private readonly scheduleAheadTime = 0.12;
   playing = false;
@@ -34,6 +35,10 @@ export class PlaybackEngine {
 
   setMetronomeOn(v: boolean): void {
     this.metronomeOn = v;
+  }
+
+  setSubdivide(v: boolean): void {
+    this.subdivide = v;
   }
 
   configure(progression: Progression, bpm: number): void {
@@ -73,9 +78,10 @@ export class PlaybackEngine {
   private scheduler = (): void => {
     while (this.nextTickTime < this.ctx.currentTime + this.scheduleAheadTime) {
       const tickInBar = this.nextTickIndexAbs % this.ticksPerBar;
-      if (this.metronomeOn && tickInBar % this.pulseTicks === 0) {
-        const pulseIdx = tickInBar / this.pulseTicks;
-        this.playClick(this.nextTickTime, this.accent[pulseIdx] ?? false);
+      const isPulseStart = tickInBar % this.pulseTicks === 0;
+      if (this.metronomeOn && (isPulseStart || this.subdivide)) {
+        const accent = isPulseStart && (this.accent[tickInBar / this.pulseTicks] ?? false);
+        this.playClick(this.nextTickTime, accent);
       }
       this.onScheduledTick({ tickIndexAbs: this.nextTickIndexAbs, time: this.nextTickTime });
       this.nextTickTime += this.tickDuration;

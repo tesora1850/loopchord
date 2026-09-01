@@ -29,11 +29,12 @@ export function PracticeScreen({ level, barCount, onBack }: PracticeScreenProps)
   const [timeSigId, setTimeSigId] = useState<TimeSigId>('4/4');
   const [bpm, setBpm] = useState(config.defaultBpm);
   const [metronomeOn, setMetronomeOn] = useState(true);
+  const [subdivide, setSubdivide] = useState(false);
   const [progression, setProgression] = useState<Progression>(() =>
     generateProgression(level, barCount, timeSigId, keyPc),
   );
 
-  const playback = usePlayback(progression, bpm, metronomeOn);
+  const playback = usePlayback(progression, bpm, metronomeOn, subdivide);
 
   const handleKeyChange = (pc: number) => {
     setKeyPc(pc);
@@ -120,6 +121,16 @@ export function PracticeScreen({ level, barCount, onBack }: PracticeScreenProps)
           aria-pressed={metronomeOn}
         >
           🔊 메트로놈
+        </button>
+
+        <button
+          className={subdivide ? 'tb-subdivide tb-subdivide-active' : 'tb-subdivide'}
+          onClick={() => setSubdivide((v) => !v)}
+          type="button"
+          aria-pressed={subdivide}
+          title="박마다 딴, 세분박마다 따다 — 예: 6/8에서 딴따다 딴따다"
+        >
+          딴따다
         </button>
       </div>
 

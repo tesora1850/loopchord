@@ -8,7 +8,7 @@ export interface PlaybackHead {
   activeChordTick: number | null;
 }
 
-export function usePlayback(progression: Progression, bpm: number, metronomeOn: boolean) {
+export function usePlayback(progression: Progression, bpm: number, metronomeOn: boolean, subdivide: boolean) {
   const engineRef = useRef<PlaybackEngine | null>(null);
   const eventsRef = useRef<{ tickIndexAbs: number; time: number }[]>([]);
   const progressionRef = useRef(progression);
@@ -39,6 +39,10 @@ export function usePlayback(progression: Progression, bpm: number, metronomeOn: 
   useEffect(() => {
     engineRef.current?.setMetronomeOn(metronomeOn);
   }, [metronomeOn]);
+
+  useEffect(() => {
+    engineRef.current?.setSubdivide(subdivide);
+  }, [subdivide]);
 
   useEffect(() => {
     function tick() {
