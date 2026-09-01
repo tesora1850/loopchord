@@ -46,6 +46,11 @@
   fill: var(--accent-strong);
 }
 
+.chord-tension {
+  font-weight: 500;
+  fill: var(--gold);
+}
+
 .chord-active-underline {
   fill: var(--accent);
   opacity: 0.35;

@@ -1,6 +1,7 @@
 import type { Bar, Progression } from '../music/generator';
+import type { ChordSymbol, KeyDef } from '../music/theory';
 import type { TimeSignature } from '../music/rhythm';
-import { chordLabel } from '../music/theory';
+import { chordLabelParts } from '../music/theory';
 import { groupNotes } from './beamGroups';
 import './StaffView.css';
 
@@ -13,9 +14,42 @@ const CHORD_LABEL_Y = STEM_TOP - 10;
 const USABLE_W = BAR_W - PAD_X * 2;
 const NOTEHEAD_W = 7.5;
 const NOTEHEAD_H = 15;
+// IBM Plex Mono는 고정폭이라 문자 수만으로 실제 렌더링 너비를 정확히 추정할 수 있다.
+const MONO_CHAR_WIDTH = 0.62;
+const TENSION_SIZE_RATIO = 0.64;
+const TENSION_RAISE = 0.55; // 베이스 폰트 크기 대비 위로 띄우는 비율
 
 function xOf(tick: number, ticksPerBar: number): number {
   return PAD_X + (tick / ticksPerBar) * USABLE_W;
+}
+
+function labelWidth(base: string, superscript: string, fontSize: number): number {
+  return base.length * fontSize * MONO_CHAR_WIDTH + superscript.length * fontSize * TENSION_SIZE_RATIO * MONO_CHAR_WIDTH;
+}
+
+const FONT_CANDIDATES = [15, 13, 11.5, 10, 9, 8];
+
+// 텐션이 붙으면 라벨이 길어지므로, 실제 라벨 폭과 다음 코드 위치를 비교해 겹치지 않는 가장 큰 폰트를 고른다.
+function pickFontSize(
+  chordSlots: { tick: number; chord: ChordSymbol }[],
+  ticksPerBar: number,
+  key: KeyDef,
+): number {
+  for (const fontSize of FONT_CANDIDATES) {
+    let fits = true;
+    for (let i = 0; i < chordSlots.length; i++) {
+      const { base, superscript } = chordLabelParts(chordSlots[i].chord, key);
+      const width = labelWidth(base, superscript, fontSize);
+      const x = xOf(chordSlots[i].tick, ticksPerBar);
+      const boundary = i + 1 < chordSlots.length ? xOf(chordSlots[i + 1].tick, ticksPerBar) : BAR_W - PAD_X;
+      if (x + width > boundary + 2) {
+        fits = false;
+        break;
+      }
+    }
+    if (fits) return fontSize;
+  }
+  return FONT_CANDIDATES[FONT_CANDIDATES.length - 1];
 }
 
 // 1틱=8분음표(깃발/빔), 2틱=4분음표(기둥만), 3틱=점4분음표(점). 그 이상은 단순화해 기둥만 표시.
@@ -69,6 +103,9 @@ interface BarViewProps {
 function BarView({ bar, barNumber, timeSig, keyAccidental, isActiveBar, activeChordTick }: BarViewProps) {
   const ticksPerBar = timeSig.ticksPerBar;
   const units = groupNotes(bar.noteSlots, timeSig);
+  const key: KeyDef = { pc: 0, name: '', accidental: keyAccidental };
+  const fontSize = pickFontSize(bar.chordSlots, ticksPerBar, key);
+  const tensionFontSize = fontSize * TENSION_SIZE_RATIO;
   return (
     <svg className="bar-svg" viewBox={`0 0 ${BAR_W} ${BAR_H}`} role="img" aria-label={`마디 ${barNumber}`}>
       {isActiveBar && <rect className="bar-active-tint" x={1} y={1} width={BAR_W - 2} height={BAR_H - 2} rx={8} />}
@@ -82,10 +119,11 @@ function BarView({ bar, barNumber, timeSig, keyAccidental, isActiveBar, activeCh
       {bar.chordSlots.map((cs, i) => {
         const nextTick = bar.chordSlots[i + 1]?.tick ?? ticksPerBar;
         const isActiveChord = isActiveBar && activeChordTick === cs.tick;
-        const fontSize = bar.chordSlots.length <= 2 ? 15 : bar.chordSlots.length === 3 ? 11.5 : 10;
-        const label = chordLabel(cs.chord, { pc: 0, name: '', accidental: keyAccidental });
-        const estWidth = label.length * fontSize * 0.62;
+        const { base, superscript } = chordLabelParts(cs.chord, key);
+        const baseWidth = base.length * fontSize * MONO_CHAR_WIDTH;
+        const estWidth = labelWidth(base, superscript, fontSize);
         const labelX = Math.min(xOf(cs.tick, ticksPerBar), BAR_W - PAD_X - estWidth);
+        const labelClass = isActiveChord ? 'chord-label chord-label-active' : 'chord-label';
         return (
           <g key={cs.tick}>
             {isActiveChord && (
@@ -98,14 +136,19 @@ function BarView({ bar, barNumber, timeSig, keyAccidental, isActiveBar, activeCh
                 rx={1.5}
               />
             )}
-            <text
-              className={isActiveChord ? 'chord-label chord-label-active' : 'chord-label'}
-              x={labelX}
-              y={CHORD_LABEL_Y}
-              style={{ fontSize }}
-            >
-              {label}
+            <text className={labelClass} x={labelX} y={CHORD_LABEL_Y} style={{ fontSize }}>
+              {base}
             </text>
+            {superscript && (
+              <text
+                className={`${labelClass} chord-tension`}
+                x={labelX + baseWidth}
+                y={CHORD_LABEL_Y - fontSize * TENSION_RAISE}
+                style={{ fontSize: tensionFontSize }}
+              >
+                {superscript}
+              </text>
+            )}
           </g>
         );
       })}

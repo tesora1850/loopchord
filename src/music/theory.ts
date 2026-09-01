@@ -6,9 +6,19 @@ export type ChordQuality =
   | 'maj' | 'min' | 'dim'
   | 'maj7' | 'min7' | 'dom7' | 'm7b5' | 'dim7';
 
+// 'plain'(9/11/13)은 코드 기호의 7 자리를 대체해서 적고(G7→G9), 'altered'(b9/#9/#11/b13)는
+// 원래 코드 기호를 그대로 둔 채 옆에 작게 덧붙여 적는다 — 실제 리드시트 표기 관행과 동일.
+export interface Tension {
+  kind: 'plain' | 'altered';
+  text: string;
+}
+
 export interface ChordSymbol {
   root: PitchClass;
   quality: ChordQuality;
+  tension?: Tension;
+  // 트라이톤 서브(subV7)처럼 관행상 항상 플랫으로 적는 코드에 표시 — 키의 샾/플랫 선호와 무관하게 강제한다.
+  forceFlatSpelling?: boolean;
 }
 
 export function sameChord(a: ChordSymbol, b: ChordSymbol | null | undefined): boolean {
@@ -51,6 +61,34 @@ const QUALITY_SUFFIX: Record<ChordQuality, string> = {
   dim7: 'dim7',
 };
 
+// plain 텐션이 7 자리를 대체할 때 붙는 접두어 (예: maj7+plain9 → "maj"+"9" = "maj9").
+const QUALITY_TENSION_PREFIX: Record<ChordQuality, string> = {
+  maj: '',
+  min: 'm',
+  dim: 'dim',
+  maj7: 'maj',
+  min7: 'm',
+  dom7: '',
+  m7b5: 'm7b5',
+  dim7: 'dim7',
+};
+
+// 텐션이 자연스러운 코드 성질에만 후보 풀을 정의한다 (m7b5·dim7·트라이어드는 텐션을 얹지 않음).
+const TENSION_POOLS: Partial<Record<ChordQuality, Tension[]>> = {
+  dom7: [
+    { kind: 'plain', text: '9' }, { kind: 'plain', text: '13' },
+    { kind: 'altered', text: 'b9' }, { kind: 'altered', text: '#9' },
+    { kind: 'altered', text: '#11' }, { kind: 'altered', text: 'b13' },
+  ],
+  maj7: [
+    { kind: 'plain', text: '9' }, { kind: 'plain', text: '13' },
+    { kind: 'altered', text: '#11' },
+  ],
+  min7: [
+    { kind: 'plain', text: '9' }, { kind: 'plain', text: '11' },
+  ],
+};
+
 export function mod12(n: number): PitchClass {
   return ((n % 12) + 12) % 12;
 }
@@ -63,8 +101,38 @@ export function spellNote(pc: PitchClass, keyAccidental: 'sharp' | 'flat'): stri
   return keyAccidental === 'sharp' ? SHARP_NAMES[mod12(pc)] : FLAT_NAMES[mod12(pc)];
 }
 
+// 화면에 그릴 두 부분: base는 기본 크기로, superscript(있다면)는 그 옆에 작게 얹어 그린다.
+export function chordLabelParts(chord: ChordSymbol, key: KeyDef): { base: string; superscript: string } {
+  const accidental = chord.forceFlatSpelling ? 'flat' : key.accidental;
+  const rootName = spellNote(chord.root, accidental);
+
+  if (!chord.tension) {
+    return { base: rootName + QUALITY_SUFFIX[chord.quality], superscript: '' };
+  }
+  if (chord.tension.kind === 'plain') {
+    return { base: rootName + QUALITY_TENSION_PREFIX[chord.quality] + chord.tension.text, superscript: '' };
+  }
+  return { base: rootName + QUALITY_SUFFIX[chord.quality], superscript: chord.tension.text };
+}
+
 export function chordLabel(chord: ChordSymbol, key: KeyDef): string {
-  return spellNote(chord.root, key.accidental) + QUALITY_SUFFIX[chord.quality];
+  const { base, superscript } = chordLabelParts(chord, key);
+  return base + superscript;
+}
+
+// chance 확률로 코드 성질에 맞는 텐션 하나를 얹는다 (해당 성질에 정의된 풀이 없으면 그대로 반환).
+export function maybeAddTension(chord: ChordSymbol, chance: number, rng: () => number): ChordSymbol {
+  if (rng() >= chance) return chord;
+  const pool = TENSION_POOLS[chord.quality];
+  if (!pool || pool.length === 0) return chord;
+  const tension = pool[Math.floor(rng() * pool.length)];
+  return { ...chord, tension };
+}
+
+// 트라이톤 서브: 도미넌트7 코드를 반음 위 도미넌트7로 치환 (같은 트라이톤을 공유해 같은 타깃으로 해결됨).
+// 관행상 항상 플랫 표기.
+export function tritoneSub(chord: ChordSymbol): ChordSymbol {
+  return { root: mod12(chord.root + 6), quality: 'dom7', forceFlatSpelling: true };
 }
 
 // 메이저 스케일 7 디그리: I ii iii IV V vi vii
@@ -108,12 +176,21 @@ export function borrowedChords(keyRoot: PitchClass): ChordSymbol[] {
   ];
 }
 
-// target 코드로 해결되는 ii-V 페어. target이 메이저 계열이면 메이저 ii-V, 마이너 계열이면 마이너 ii-V(m7b5).
-export function iiVFor(target: ChordSymbol): [ChordSymbol, ChordSymbol] {
-  const isMinorTarget = target.quality === 'min' || target.quality === 'min7';
-  const ii: ChordSymbol = isMinorTarget
-    ? { root: mod12(target.root + 2), quality: 'm7b5' }
-    : { root: mod12(target.root + 2), quality: 'min7' };
+// target으로 해결되는 도미넌트 체인을 뒤에서부터 만든다.
+// length=2: [ii, V] (target이 마이너면 ii는 m7b5). length>=3: 그 앞으로 5도권을 따라
+// 순수 도미넌트7을 계속 쌓는다 (예: length=4 → [V7/V7ii, V7/ii, ii, V]).
+export function dominantChain(target: ChordSymbol, length: number): ChordSymbol[] {
   const v: ChordSymbol = { root: mod12(target.root + 7), quality: 'dom7' };
-  return [ii, v];
+  if (length <= 1) return [v];
+
+  const isMinorTarget = target.quality === 'min' || target.quality === 'min7';
+  const ii: ChordSymbol = { root: mod12(target.root + 2), quality: isMinorTarget ? 'm7b5' : 'min7' };
+  const chain: ChordSymbol[] = [ii, v];
+
+  let root = ii.root;
+  for (let k = 2; k < length; k++) {
+    root = mod12(root + 7);
+    chain.unshift({ root, quality: 'dom7' });
+  }
+  return chain;
 }

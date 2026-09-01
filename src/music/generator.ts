@@ -1,6 +1,6 @@
 import {
   type ChordSymbol, type PitchClass, type KeyDef,
-  diatonicChord, secondaryDominant, borrowedChords, iiVFor, sameChord,
+  diatonicChord, secondaryDominant, borrowedChords, dominantChain, tritoneSub, maybeAddTension, sameChord,
   findKey, mod12, SECONDARY_DOMINANT_TARGETS,
 } from './theory';
 import {
@@ -20,6 +20,9 @@ export interface DifficultyConfig {
   rhythmDensity: RhythmDensity;
   syncopation: boolean;
   twoFiveOneChance: number;
+  chainLengthRange: [number, number];
+  subVChance: number;
+  tensionChance: number;
   seventhChance: number;
   defaultBpm: number;
 }
@@ -29,31 +32,36 @@ export const DIFFICULTIES: DifficultyConfig[] = [
     level: 1, shortLabel: '1단계', label: '다이아토닉 트라이어드',
     description: '1마디 1코드 · 4분음표', nonDiatonicRatio: 0,
     chordChangesPerBar: [1, 1], rhythmDensity: 'quarter', syncopation: false,
-    twoFiveOneChance: 0, seventhChance: 0, defaultBpm: 60,
+    twoFiveOneChance: 0, chainLengthRange: [2, 2], subVChance: 0, tensionChance: 0,
+    seventhChance: 0, defaultBpm: 60,
   },
   {
     level: 2, shortLabel: '2단계', label: '1마디 2코드',
     description: '1마디 2코드 · 4분음표', nonDiatonicRatio: 0,
     chordChangesPerBar: [2, 2], rhythmDensity: 'quarter', syncopation: false,
-    twoFiveOneChance: 0, seventhChance: 0.3, defaultBpm: 70,
+    twoFiveOneChance: 0, chainLengthRange: [2, 2], subVChance: 0, tensionChance: 0,
+    seventhChance: 0.3, defaultBpm: 70,
   },
   {
     level: 3, shortLabel: '3단계', label: '논다이아토닉 도입',
     description: '논다이아토닉 약 1/3 · 4분음표', nonDiatonicRatio: 0.33,
     chordChangesPerBar: [1, 2], rhythmDensity: 'quarter', syncopation: false,
-    twoFiveOneChance: 0.05, seventhChance: 0.6, defaultBpm: 80,
+    twoFiveOneChance: 0.05, chainLengthRange: [2, 2], subVChance: 0, tensionChance: 0,
+    seventhChance: 0.6, defaultBpm: 80,
   },
   {
     level: 4, shortLabel: '4단계', label: '2-5-1 + 8분음표',
     description: '논다이아토닉 약 1/2 · 8분음표 혼합', nonDiatonicRatio: 0.5,
     chordChangesPerBar: [1, 2], rhythmDensity: 'eighthLow', syncopation: false,
-    twoFiveOneChance: 0.15, seventhChance: 0.8, defaultBpm: 90,
+    twoFiveOneChance: 0.15, chainLengthRange: [2, 3], subVChance: 0.15, tensionChance: 0.15,
+    seventhChance: 0.8, defaultBpm: 90,
   },
   {
     level: 5, shortLabel: '5단계', label: '자유 진행 + 당김음',
     description: '모달 인터체인지 · 8분음표+당김음', nonDiatonicRatio: 0.7,
     chordChangesPerBar: [1, 3], rhythmDensity: 'eighthHigh', syncopation: true,
-    twoFiveOneChance: 0.3, seventhChance: 1, defaultBpm: 100,
+    twoFiveOneChance: 0.3, chainLengthRange: [2, 4], subVChance: 0.35, tensionChance: 0.35,
+    seventhChance: 1, defaultBpm: 100,
   },
 ];
 
@@ -90,7 +98,8 @@ function pickChord(config: DifficultyConfig, keyRoot: PitchClass, rng: Rng, avoi
 
   const candidates = pool.filter((c) => !sameChord(c, avoid));
   const usable = candidates.length > 0 ? candidates : pool;
-  return usable[Math.floor(rng() * usable.length)];
+  const chosen = usable[Math.floor(rng() * usable.length)];
+  return maybeAddTension(chosen, config.tensionChance, rng);
 }
 
 function chordCountForBar(config: DifficultyConfig, rng: Rng): number {
@@ -124,9 +133,19 @@ function assembleBars(skeletons: { noteSlots: NoteSlot[]; chordCount: number }[]
   });
 }
 
-// 8마디(가변) 전체를 이어붙인 흐름에서, 무작위 지점을 타깃(I)으로 잡아 앞의 두 코드 슬롯을 ii-V로 치환.
-// 겹치지 않도록 삽입 후 3슬롯을 건너뛴다.
-function applyTwoFiveOne(bars: Bar[], config: DifficultyConfig, rng: Rng): void {
+// 체인의 각 도미넌트 링크에 확률적으로 트라이톤 서브 치환 + 텐션을 얹는다. ii(min7/m7b5)는 서브 대상이 아니다.
+function decorateChainLink(chord: ChordSymbol, config: DifficultyConfig, rng: Rng): ChordSymbol {
+  let c = chord;
+  if (c.quality === 'dom7' && rng() < config.subVChance) c = tritoneSub(c);
+  return maybeAddTension(c, config.tensionChance, rng);
+}
+
+// 8마디(가변) 전체를 이어붙인 흐름에서, 무작위 지점을 타깃(I)으로 잡아 그 앞을 도미넌트 체인(ii-V, 또는 더 긴
+// 확장된 도미넌트 체인)으로 치환한다. 체인 길이는 "타깃 앞 최대 3마디 안에 있는 코드 슬롯 수"를 넘지 않는다 —
+// 마디 밀도가 낮으면 체인도 짧게, 밀도가 높으면(예: 3마디×마디당 2개=6슬롯) 체인도 그만큼 길어질 수 있다.
+const CHAIN_LOOKBACK_BARS = 3;
+
+function applyDominantChains(bars: Bar[], config: DifficultyConfig, rng: Rng): void {
   if (config.twoFiveOneChance <= 0) return;
   const flat: { bar: number; idx: number }[] = [];
   bars.forEach((b, bi) => b.chordSlots.forEach((_, si) => flat.push({ bar: bi, idx: si })));
@@ -134,14 +153,28 @@ function applyTwoFiveOne(bars: Bar[], config: DifficultyConfig, rng: Rng): void 
   let i = 2;
   while (i < flat.length) {
     if (rng() < config.twoFiveOneChance) {
-      const t = flat[i];
-      const target = bars[t.bar].chordSlots[t.idx].chord;
-      const [ii, v] = iiVFor(target);
-      const p1 = flat[i - 1];
-      const p2 = flat[i - 2];
-      bars[p2.bar].chordSlots[p2.idx].chord = ii;
-      bars[p1.bar].chordSlots[p1.idx].chord = v;
-      i += 3;
+      const targetRef = flat[i];
+      const target = bars[targetRef.bar].chordSlots[targetRef.idx].chord;
+
+      const earliestBar = Math.max(0, targetRef.bar - CHAIN_LOOKBACK_BARS);
+      let roomAvailable = 0;
+      while (roomAvailable < i && flat[i - 1 - roomAvailable].bar >= earliestBar) roomAvailable++;
+
+      const [minLen, maxLen] = config.chainLengthRange;
+      const desired = minLen + Math.floor(rng() * (maxLen - minLen + 1));
+      const length = Math.min(desired, roomAvailable);
+
+      if (length < 2) {
+        i += 1;
+        continue;
+      }
+
+      const chain = dominantChain(target, length).map((link) => decorateChainLink(link, config, rng));
+      for (let k = 0; k < chain.length; k++) {
+        const ref = flat[i - chain.length + k];
+        bars[ref.bar].chordSlots[ref.idx].chord = chain[k];
+      }
+      i += chain.length + 1;
     } else {
       i += 1;
     }
@@ -183,7 +216,7 @@ export function generateProgression(
   const skeletons = Array.from({ length: barCount }, () => buildBarSkeleton(config, ts, rng));
   const chordSequence = generateChordSequence(skeletons.map((s) => s.chordCount), config, keyRoot, rng);
   const bars = assembleBars(skeletons, chordSequence, ts, rng);
-  applyTwoFiveOne(bars, config, rng);
+  applyDominantChains(bars, config, rng);
   fixLoopBoundary(bars, config, keyRoot, rng);
   return { bars, timeSig: ts, key: findKey(keyRoot), level };
 }
@@ -197,7 +230,7 @@ export function refreshChordsOnly(prog: Progression, rng: Rng = Math.random): Pr
     noteSlots: b.noteSlots,
     chordSlots: b.chordSlots.map((cs, i) => ({ tick: cs.tick, chord: chordSequence[bi][i] })),
   }));
-  applyTwoFiveOne(bars, config, rng);
+  applyDominantChains(bars, config, rng);
   fixLoopBoundary(bars, config, prog.key.pc, rng);
   return { ...prog, bars };
 }
@@ -223,7 +256,7 @@ export function transposeProgression(prog: Progression, newKeyRoot: PitchClass):
     noteSlots: b.noteSlots,
     chordSlots: b.chordSlots.map((cs) => ({
       tick: cs.tick,
-      chord: { root: mod12(cs.chord.root + delta), quality: cs.chord.quality },
+      chord: { ...cs.chord, root: mod12(cs.chord.root + delta) },
     })),
   }));
   return { ...prog, bars, key: findKey(newKeyRoot) };
