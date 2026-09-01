@@ -1,6 +1,6 @@
 import {
   type ChordSymbol, type PitchClass, type KeyDef,
-  diatonicChord, secondaryDominant, borrowedChords, iiVFor,
+  diatonicChord, secondaryDominant, borrowedChords, iiVFor, sameChord,
   findKey, mod12, SECONDARY_DOMINANT_TARGETS,
 } from './theory';
 import {
@@ -74,29 +74,54 @@ export interface Progression {
   level: Level;
 }
 
-function pickChord(config: DifficultyConfig, keyRoot: PitchClass, rng: Rng): ChordSymbol {
+const DEGREE_COUNT = 7;
+
+// avoid가 주어지면 그 코드는 후보 풀에서 제외하고 뽑는다 — 바로 앞 코드와의 즉시 반복을 원천 차단.
+function pickChord(config: DifficultyConfig, keyRoot: PitchClass, rng: Rng, avoid: ChordSymbol | null): ChordSymbol {
   const useSeventh = rng() < config.seventhChance;
-  if (rng() < config.nonDiatonicRatio) {
-    const pool: ChordSymbol[] = SECONDARY_DOMINANT_TARGETS.map((t) => secondaryDominant(keyRoot, t));
-    if (config.level === 5) pool.push(...borrowedChords(keyRoot));
-    return pool[Math.floor(rng() * pool.length)];
-  }
-  const degreeIndex = Math.floor(rng() * 7);
-  return diatonicChord(keyRoot, degreeIndex, useSeventh);
+  const useNonDiatonic = rng() < config.nonDiatonicRatio;
+
+  const pool: ChordSymbol[] = useNonDiatonic
+    ? [
+        ...SECONDARY_DOMINANT_TARGETS.map((t) => secondaryDominant(keyRoot, t)),
+        ...(config.level === 5 ? borrowedChords(keyRoot) : []),
+      ]
+    : Array.from({ length: DEGREE_COUNT }, (_, d) => diatonicChord(keyRoot, d, useSeventh));
+
+  const candidates = pool.filter((c) => !sameChord(c, avoid));
+  const usable = candidates.length > 0 ? candidates : pool;
+  return usable[Math.floor(rng() * usable.length)];
 }
 
-function chordSequenceForBar(config: DifficultyConfig, keyRoot: PitchClass, rng: Rng): ChordSymbol[] {
+function chordCountForBar(config: DifficultyConfig, rng: Rng): number {
   const [min, max] = config.chordChangesPerBar;
-  const count = min + Math.floor(rng() * (max - min + 1));
-  return Array.from({ length: count }, () => pickChord(config, keyRoot, rng));
+  return min + Math.floor(rng() * (max - min + 1));
 }
 
-function buildBar(config: DifficultyConfig, ts: TimeSignature, keyRoot: PitchClass, rng: Rng): Bar {
-  const noteSlots = generateNoteRhythm(ts, config.rhythmDensity, config.syncopation, rng);
-  const chords = chordSequenceForBar(config, keyRoot, rng);
-  const ticks = pickChordChangeTicks(noteSlots, chords.length, minChordGapTicks(ts), rng);
-  const chordSlots = ticks.map((tick, i) => ({ tick, chord: chords[i] }));
-  return { noteSlots, chordSlots };
+function buildBarSkeleton(config: DifficultyConfig, ts: TimeSignature, rng: Rng): { noteSlots: NoteSlot[]; chordCount: number } {
+  return { noteSlots: generateNoteRhythm(ts, config.rhythmDensity, config.syncopation, rng), chordCount: chordCountForBar(config, rng) };
+}
+
+// 마디 경계를 넘나들며 순차적으로 코드를 뽑아 "바로 앞 코드와 같은 코드"가 나오지 않게 한다.
+function generateChordSequence(chordCounts: number[], config: DifficultyConfig, keyRoot: PitchClass, rng: Rng): ChordSymbol[][] {
+  const result: ChordSymbol[][] = chordCounts.map(() => []);
+  let prev: ChordSymbol | null = null;
+  for (let bi = 0; bi < chordCounts.length; bi++) {
+    for (let si = 0; si < chordCounts[bi]; si++) {
+      const chord = pickChord(config, keyRoot, rng, prev);
+      result[bi].push(chord);
+      prev = chord;
+    }
+  }
+  return result;
+}
+
+function assembleBars(skeletons: { noteSlots: NoteSlot[]; chordCount: number }[], chordSequence: ChordSymbol[][], ts: TimeSignature, rng: Rng): Bar[] {
+  return skeletons.map((sk, bi) => {
+    const ticks = pickChordChangeTicks(sk.noteSlots, sk.chordCount, minChordGapTicks(ts), rng);
+    const chordSlots = ticks.map((tick, i) => ({ tick, chord: chordSequence[bi][i] }));
+    return { noteSlots: sk.noteSlots, chordSlots };
+  });
 }
 
 // 8마디(가변) 전체를 이어붙인 흐름에서, 무작위 지점을 타깃(I)으로 잡아 앞의 두 코드 슬롯을 ii-V로 치환.
@@ -123,6 +148,29 @@ function applyTwoFiveOne(bars: Bar[], config: DifficultyConfig, rng: Rng): void 
   }
 }
 
+// 이 진행은 반복 재생되는 루프이므로, 마지막 코드→첫 코드로 돌아가는 경계도 반복 금지 대상이다.
+// 2-5-1 삽입까지 끝난 뒤 맨 마지막에 실행해야, 앞선 단계가 이 보정을 덮어쓰지 않는다.
+function fixLoopBoundary(bars: Bar[], config: DifficultyConfig, keyRoot: PitchClass, rng: Rng): void {
+  if (bars.length < 2) return;
+  const firstSlots = bars[0].chordSlots;
+  const lastSlots = bars[bars.length - 1].chordSlots;
+  if (firstSlots.length === 0 || lastSlots.length === 0) return;
+
+  const last = lastSlots[lastSlots.length - 1].chord;
+  const first = firstSlots[0].chord;
+  if (!sameChord(first, last)) return;
+
+  // firstBar에 코드가 1개뿐이면(레벨1처럼) "다음 코드"는 같은 마디가 아니라 다음 마디의 첫 코드다.
+  const next = firstSlots.length > 1 ? firstSlots[1].chord : (bars[1]?.chordSlots[0]?.chord ?? null);
+  let replacement = pickChord(config, keyRoot, rng, last);
+  let attempts = 0;
+  while (sameChord(replacement, next) && attempts < 6) {
+    replacement = pickChord(config, keyRoot, rng, last);
+    attempts++;
+  }
+  firstSlots[0] = { tick: firstSlots[0].tick, chord: replacement };
+}
+
 export function generateProgression(
   level: Level,
   barCount: number,
@@ -132,19 +180,25 @@ export function generateProgression(
 ): Progression {
   const config = DIFFICULTIES[level - 1];
   const ts = TIME_SIGNATURES[timeSigId];
-  const bars = Array.from({ length: barCount }, () => buildBar(config, ts, keyRoot, rng));
+  const skeletons = Array.from({ length: barCount }, () => buildBarSkeleton(config, ts, rng));
+  const chordSequence = generateChordSequence(skeletons.map((s) => s.chordCount), config, keyRoot, rng);
+  const bars = assembleBars(skeletons, chordSequence, ts, rng);
   applyTwoFiveOne(bars, config, rng);
+  fixLoopBoundary(bars, config, keyRoot, rng);
   return { bars, timeSig: ts, key: findKey(keyRoot), level };
 }
 
 // 코드만 재생성: 기존 리듬(노트 슬롯·코드 변경 타이밍)은 그대로, 코드 내용만 새로 뽑는다.
 export function refreshChordsOnly(prog: Progression, rng: Rng = Math.random): Progression {
   const config = DIFFICULTIES[prog.level - 1];
-  const bars = prog.bars.map((b) => ({
+  const chordCounts = prog.bars.map((b) => b.chordSlots.length);
+  const chordSequence = generateChordSequence(chordCounts, config, prog.key.pc, rng);
+  const bars = prog.bars.map((b, bi) => ({
     noteSlots: b.noteSlots,
-    chordSlots: b.chordSlots.map((cs) => ({ tick: cs.tick, chord: pickChord(config, prog.key.pc, rng) })),
+    chordSlots: b.chordSlots.map((cs, i) => ({ tick: cs.tick, chord: chordSequence[bi][i] })),
   }));
   applyTwoFiveOne(bars, config, rng);
+  fixLoopBoundary(bars, config, prog.key.pc, rng);
   return { ...prog, bars };
 }
 

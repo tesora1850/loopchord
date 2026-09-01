@@ -11,6 +11,10 @@ export interface ChordSymbol {
   quality: ChordQuality;
 }
 
+export function sameChord(a: ChordSymbol, b: ChordSymbol | null | undefined): boolean {
+  return !!b && a.root === b.root && a.quality === b.quality;
+}
+
 export interface KeyDef {
   pc: PitchClass;
   name: string;
